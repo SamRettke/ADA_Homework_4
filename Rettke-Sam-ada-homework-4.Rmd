@@ -1,0 +1,644 @@
+---
+title: "Rettke-Sam-ada-homework-4"
+author: "Sam Rettke"
+date: "11/07/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Install and load packages:**
+
+```{r}
+library(devtools)
+remotes::install_github("joachim-gassen/tidycovid19")
+easypackages::libraries("tidyverse", "patchwork", "scales", "collapse", "BBmisc", "tidycovid19")
+```
+
+**Copy and run code for dataframe cv_data:**
+
+```{r}
+merged <- download_merged_data(cached = TRUE)
+merged <- merged %>% group_by(country, iso3c) %>%
+  arrange(country, iso3c, date) %>%
+  ## code to drop recovered
+  select(-recovered) %>%
+  ##code to replace NAs with zeros
+  mutate(
+    confirmed = ifelse(is.na(confirmed), 0, confirmed),
+    deaths = ifelse(is.na(deaths), 0, deaths)) %>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1)) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0)) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+
+add_world1 <- merged %>% group_by(date) %>%
+  arrange(date) %>%
+  summarize(
+    country = "World",
+    iso3c = NA,
+    confirmed = sum(confirmed, na.rm = TRUE),
+    deaths = sum(deaths, na.rm = TRUE),
+    timestamp = fmode(timestamp)) %>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1)) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0)) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+  
+add_world2 <- merged %>% group_by(country, iso3c) %>%
+  summarize(
+    population = fmode(population),
+    land_area_skm = fmode(land_area_skm),
+    timestamp = fmode(timestamp)) %>%
+  ungroup() %>%
+  summarize(
+    country = "World", iso3c = NA,
+    population = sum(population, na.rm = TRUE),
+    land_area_skm = sum(land_area_skm, na.rm = TRUE)) %>%
+  mutate(pop_density = population / land_area_skm)
+
+add_world <- left_join(add_world1, add_world2, by = c("country", "iso3c"))
+merged <- bind_rows(merged, add_world)
+
+cv_data <- pivot_longer(merged,
+    cols=c("confirmed", "deaths",
+    "daily_confirmed", "daily_deaths"),
+    names_to = "variable", values_to = "cases"
+  ) %>%
+  arrange(country, variable, date) %>%
+  rename(area = land_area_skm, density = pop_density) %>%
+  mutate(rate = cases / population * 10^6) %>%
+  ## code to omit data after 2021-07-01
+  filter(date < "2021-07-01")
+
+rm(list=c("merged", "add_world", "add_world1", "add_world2"))
+```
+
+**Copy and run code for function cv_summary:**
+
+```{r}
+cv_summary <- function(d, country_list = "World",
+  plot = TRUE, facet = "country",
+  status = c("confirmed", "deaths")){
+  # based on `wes_palettes()` color schemes GrandBudapest1, IsleofDogs1,
+  # IsleofDogs2 from the {wesanderson} package
+  my_palette <- c("#5B1A18", "#FD6467", "#F1BB7B",
+    "#D67236", "#0F0D0E", "#9986A5", "#79402E",
+    "#CCBA72", "#D9D0D3", "#8D8680", "#EAD3BF",
+    "#AA9486", "#B6854D", "#39312F", "#1C1718")
+  
+  if (facet == "country"){
+    fill <- "variable"
+    n <- length(unique(d$variable)) / 2
+    # need only half of unique # of variables (3)
+  }
+
+  if (facet == "variable"){
+    fill <- "country"
+    n <- length(country_list)
+    # need number of countries
+  }
+  
+  if ("All" %in% country_list) {
+    country_list <- unique(d$country)
+    country_list <- setdiff(country_list, "World")
+  }
+
+  if ("World" %in% country_list) {
+    d <- d %>% filter(country %in% country_list)
+
+    totals <- d %>% group_by(variable) %>%
+      summarize(
+        country = "World",
+        cases = max(cases),
+        population = max(population),
+        area = max(area),
+        density = max(density),
+        rate = max(rate, na.rm = TRUE),
+        on = max(date)
+      ) %>%
+      select(country, variable, cases, population, area, density, rate, on) %>%
+      arrange(variable) %>%
+      ungroup()
+  }
+  
+  if ("World" %nin% country_list) {
+    d <- d %>% filter(country %in% country_list)
+    totals <- d %>% group_by(country, variable) %>%
+      summarize(
+        cases = max(cases),
+        population = max(population),
+        area = max(area),
+        density = max(density),
+        rate = max(rate, na.rm = TRUE),
+        on = max(date),
+        gdp_capita = fmode(gdp_capita),
+        income = fmode(income),
+        life_expectancy = fmode(life_expectancy),
+        max_sd = max(soc_dist),
+        max_mr = max(mov_rest)
+      ) %>%
+      select(country, variable, cases, population, area, density, rate,
+        gdp_capita, income, life_expectancy, max_sd, max_mr, on) %>%
+      arrange(country, variable) %>%
+      ungroup()
+  }
+  
+  if (plot == TRUE){
+    cc <- filter(d, variable %in% status)
+    cum_cases_plot <- ggplot(
+      data = cc,
+        # use the tidy evaluation pronoun .data to slice the chosen fill
+        # variable from the data frame
+        aes(x = date, y = cases + 1, color = .data[[fill]],
+          fill = .data[[fill]])) +
+      geom_point(size = 0.5) +
+      geom_line() +
+      # use the tidy evaluation pronoun .data to slice the chosen facet_wrap
+      # variable from the data frame
+      facet_wrap(~ .data[[facet]], ncol = 4, scales = "free_y") +
+      xlab("Date") + ylab("Log Cumulative Cases") +
+      scale_y_log10(
+        breaks = trans_breaks("log10", function(x) 10^x),
+        labels = trans_format("log10", math_format(10^.x))) +
+      scale_color_manual(aesthetics = c("color", "fill"),
+        name = NULL, values = my_palette)
+
+    dc <- filter(d, variable %in% paste0("daily_", status))
+    daily_cases_plot <- ggplot(
+      data = dc,
+        aes(x = date, y = cases, color = .data[[fill]],
+          fill = .data[[fill]])) +
+      geom_point(size = 0.5) +
+      geom_line() +
+      facet_wrap(~ .data[[facet]], ncol = 4, scales = "free_y") +
+      xlab("Date") + ylab("Daily Cases") +
+      scale_color_manual(aesthetics = c("color", "fill"),
+        name = NULL, values = my_palette)
+  }
+
+  if (plot == TRUE) {
+    return(list(totals = totals,
+      cum_cases_plot = cum_cases_plot,
+      daily_cases_plot = daily_cases_plot)
+    )
+  } else {  
+    return(list(totals = totals))
+  }
+}
+```
+
+**Challenge 1**
+
+*edit code for cv_data (i.e., do not drop variable "recovered", also add in column for daily number of recovered)
+
+```{r}
+merged <- download_merged_data(cached = TRUE)
+merged <- merged %>% group_by(country, iso3c) %>%
+  arrange(country, iso3c, date) %>%
+  ##code to replace NAs with zeros 
+  mutate(
+    confirmed = ifelse(is.na(confirmed), 0, confirmed),
+    deaths = ifelse(is.na(deaths), 0, deaths),
+    recovered = ifelse(is.na(recovered), 0, recovered))%>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1),
+    daily_recovered = recovered - lag(recovered, n = 1))%>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0),
+    daily_recovered = replace_na(daily_recovered, 0)) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+
+add_world1 <- merged %>% group_by(date) %>%
+  arrange(date) %>%
+  summarize(
+    country = "World",
+    iso3c = NA,
+    confirmed = sum(confirmed, na.rm = TRUE),
+    deaths = sum(deaths, na.rm = TRUE),
+    recovered = sum(recovered, na.rm = TRUE),
+    timestamp = fmode(timestamp)) %>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1),
+    daily_recovered = recovered - lag(recovered, n =1)) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0),
+    daily_recovered = replace_na(daily_recovered, 0)) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+  
+add_world2 <- merged %>% group_by(country, iso3c) %>%
+  summarize(
+    population = fmode(population),
+    land_area_skm = fmode(land_area_skm),
+    timestamp = fmode(timestamp)) %>%
+  ungroup() %>%
+  summarize(
+    country = "World", iso3c = NA,
+    population = sum(population, na.rm = TRUE),
+    land_area_skm = sum(land_area_skm, na.rm = TRUE)) %>%
+  mutate(pop_density = population / land_area_skm)
+
+add_world <- left_join(add_world1, add_world2, by = c("country", "iso3c"))
+merged <- bind_rows(merged, add_world)
+
+cv_data <- pivot_longer(merged,
+    cols=c("confirmed", "deaths", "recovered",
+    "daily_confirmed", "daily_deaths", "daily_recovered"),
+    names_to = "variable", values_to = "cases"
+  ) %>%
+  arrange(country, variable, date) %>%
+  rename(area = land_area_skm, density = pop_density) %>%
+  mutate(rate = cases / population * 10^6) %>%
+  ## code to omit data after 2021-07-01
+  filter(date < "2021-07-01")
+
+rm(list=c("merged", "add_world", "add_world1", "add_world2"))
+
+cv_data <- cv_data[!(cv_data$variable == "recovered" & cv_data$cases < 0), ]
+cv_data <- cv_data[!(cv_data$variable == "daily_recovered" & cv_data$cases < 0), ]# without removing these lines, the plot I was getting had negative recovered cases at one point
+head(cv_data)
+```
+
+**Challenge 1 cont.**
+
+*plot global data on confirmed coronavirus infections, deaths, and recoveries
+
+```{r}
+cv_summary(cv_data, country_list = "World",
+  plot = TRUE, facet = "country",
+  status = c("confirmed", "deaths", "recovered"))
+```
+
+**Challenge 2**
+
+*facet plots of confirmed coronavirus infections, deaths, and recoveries by country
+
+```{r}
+cv_summary(cv_data, country_list = c("United States", "United Kingdom", "Germany", "South Africa", "China", "Russia", "Iran", "India"),
+  plot = TRUE, facet = "country",
+  status = c("confirmed", "deaths", "recovered"))
+```
+
+**Challenge 2 cont.**
+
+*facet plots of confirmed coronavirus infections, deaths, and recoveries by variable
+
+```{r}
+cv_summary(cv_data, country_list = c("United States", "United Kingdom", "Germany", "South Africa", "China", "Russia", "Iran", "India"),
+  plot = TRUE, facet = "variable",
+  status = c("confirmed", "deaths", "recovered"))
+```
+
+**Challenge 3**
+
+*return summary data for all countries
+
+```{r}
+d <- cv_summary(cv_data, country_list = c("All"),
+  plot = FALSE, facet = "country",
+  status = c("confirmed", "deaths", "recovered"))
+d <- d[[1]]
+d <- filter(d, population > 1000000) %>%
+  arrange(population) %>%
+  print #arranged in order of increasing pop. to show all pop. are > 1 million
+num_countries = (nrow(d)/6) %>%
+  print # number of countries in tibble = 155
+```
+
+**Challenge 4**
+
+*create new tibbles for "overall" and "daily" that include only data on the variables “confirmed” and “daily_confirmed” cases, respectively
+
+```{r}
+overall <- filter(d, variable == "confirmed")
+daily <- filter(d, variable == "daily_confirmed")
+```
+Bahrain, Czechia, Slovenia, Uruguay, and Sweden have the highest overall rate of confirmed cases.
+```{r}
+overall_by_rate <- arrange(overall, desc(rate)) %>%
+  print  
+```
+Turkey, Sweden, Switzerland, Uruguay, and Belgium have the highest single-day rate of confirmed cases.
+```{r}
+daily_by_rate <- arrange(daily, desc(rate)) %>%
+  print
+```
+United States, India, Brazil, France, and Russia have the highest overall total of cases.
+```{r}
+overall_by_cases <- arrange(overall, desc(cases)) %>%
+  print
+```
+Turkey, India, United States, France, and Brazil have the highest single-day total of cases.
+```{r}
+daily_by_cases <- arrange(daily, desc(cases)) %>%
+  print
+```
+
+**Challenge 5**
+
+*run a linear model to evaluate how rate is related to density, population, gdp_capita, and income
+
+```{r}
+library(car)
+library(broom)
+library(jtools)
+#filter out missing gdp_capita values
+overall_adj <- filter(overall, gdp_capita != "NA") %>%
+  select(rate, density, population, gdp_capita, income) %>%
+  print
+#change income from a character variable into a factor
+overall_adj$income <- factor(overall_adj$income)
+str(overall_adj$income)
+#preliminary visualizations for overall rate by density, population, and gdp_capita
+ggplot(data = overall_adj, aes(x = density, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = overall_adj, aes(x = population, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = overall_adj, aes(x = gdp_capita, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+#log1p transform all variables except income
+overall_adj$log1prate <- log1p(overall_adj$rate)
+overall_adj$log1pdensity <- log1p(overall_adj$density)
+overall_adj$log1ppopulation <- log1p(overall_adj$population)
+overall_adj$log1pgdp_capita <- log1p(overall_adj$gdp_capita)
+#re-plot with transformed variables
+ggplot(data = overall_adj, aes(x = log1pdensity, y = log1prate)) +
+  geom_point() + geom_smooth(method="lm")
+ggplot(data = overall_adj, aes(x = log1ppopulation, y = log1prate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = overall_adj, aes(x = log1pgdp_capita, y = log1prate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = overall_adj , aes(x = income, y = log1prate)) + geom_boxplot()
+#run full linear model
+m <- lm(data = overall_adj, log1prate ~ log1pdensity + log1ppopulation + log1pgdp_capita + income)
+summary(m)
+```
+Based on the full linear model, only the predictor "income" has a slope significantly different from zero.
+```{r}
+tidy(m)
+plot(fitted(m), residuals(m))
+hist(residuals(m))
+qqnorm(residuals(m))
+qqline(residuals(m)) #residuals do not look very normally distributed, suggesting the assumptions for linear regression may still not be met
+```
+
+**Challenge 6**
+
+*run stepwise selection using AIC to evaluate which model is best
+
+```{r}
+library(MASS)
+library(MuMIn)
+#run stepwise selection using function stepAIC()
+(s <- stepAIC(m, scope = . ~ ., direction = "both"))
+#model selection using function dredge()
+m <- lm(data = overall_adj, log1prate ~ log1pdensity + log1ppopulation + log1pgdp_capita + income,
+  na.action = "na.fail")
+m.set <- dredge(m, beta = "none", m.lim = c(0, 4))
+m.set
+coef(m.set)
+summary(get.models(m.set, 1)[[1]])
+```
+The best model according to the results of stepAIC() includes both population and income as predictors, while the best model according to the results of dredge() includes only income as the predictor.
+```{r}
+r.squaredGLMM(m) #pseudo-R^2 for full model
+m_best <- lm(data = overall_adj, log1prate ~ log1ppopulation + income,
+  na.action = "na.fail")
+r.squaredGLMM(m_best) #pseudo-R^2 for best model
+m_best_2 <- lm(data = overall_adj, log1prate ~ income,
+  na.action = "na.fail")
+r.squaredGLMM(m_best_2)
+m_null <- lm(data = overall_adj, log1prate ~ 1,
+  na.action = "na.fail")
+r.squaredGLMM(m_null) #pseudo-R^2 for null model
+detach(package:MASS)
+```
+
+**Challenge 6 cont.**
+
+*repeat process to determine the best model for maximum daily infection rate
+
+```{r}
+library(car)
+library(broom)
+library(jtools)
+#filter out missing gdp_capita values
+daily_adj <- filter(daily, gdp_capita != "NA") %>%
+  select(rate, density, population, gdp_capita, income) %>%
+  print
+#change income from a character variable into a factor
+daily_adj$income <- factor(daily_adj$income)
+str(daily_adj$income)
+#preliminary visualizations for daily rate by density, population, and gdp_capita
+ggplot(data = daily_adj, aes(x = density, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = daily_adj, aes(x = population, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = daily_adj, aes(x = gdp_capita, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+#log1p transform all variables except income
+daily_adj$log1prate <- log1p(daily_adj$rate)
+daily_adj$log1pdensity <- log1p(daily_adj$density)
+daily_adj$log1ppopulation <- log1p(daily_adj$population)
+daily_adj$log1pgdp_capita <- log1p(daily_adj$gdp_capita)
+#re-plot with transformed variables
+ggplot(data = daily_adj, aes(x = log1pdensity, y = log1prate)) +
+  geom_point() + geom_smooth(method="lm")
+ggplot(data = daily_adj, aes(x = log1ppopulation, y = log1prate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = daily_adj, aes(x = log1pgdp_capita, y = log1prate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = daily_adj , aes(x = income, y = log1prate)) + geom_boxplot()
+#run full linear model
+m_daily <- lm(data = daily_adj, log1prate ~ log1pdensity + log1ppopulation + log1pgdp_capita + income)
+summary(m_daily)
+tidy(m_daily)
+plot(fitted(m_daily), residuals(m_daily))
+hist(residuals(m_daily))
+qqnorm(residuals(m_daily))
+qqline(residuals(m_daily))
+```
+
+**Challenge 6 cont.**
+
+*model selection for maximum daily infection rate
+
+```{r}
+library(MASS)
+library(MuMIn)
+#run stepwise selection using function stepAIC()
+(s <- stepAIC(m_daily, scope = . ~ ., direction = "both"))
+#model selection using function dredge()
+m_daily <- lm(data = daily_adj, log1prate ~ log1pdensity + log1ppopulation + log1pgdp_capita + income,
+  na.action = "na.fail")
+m.set_daily <- dredge(m_daily, beta = "none", m.lim = c(0, 4))
+m.set_daily
+coef(m.set_daily)
+summary(get.models(m.set_daily, 1)[[1]])
+```
+The best model according to the results of both stepAIC() and dredge() for the maximum daily infection rate includes both population and income as predictors. So, compared to the overall infection rate, either the predictors are the same or population is an added predictor depending on the function used previously.
+```{r}
+r.squaredGLMM(m_daily) #pseudo-R^2 for full model
+m_daily_best <- lm(data = daily_adj, log1prate ~ log1ppopulation + income,
+  na.action = "na.fail")
+r.squaredGLMM(m_daily_best) #pseudo-R^2 for best model
+m_daily_null <- lm(data = daily_adj, log1prate ~ 1,
+  na.action = "na.fail")
+r.squaredGLMM(m_daily_null) #pseudo-R^2 for null model
+detach(package:MASS)
+```
+
+**Challenge 7**
+
+*add in the maximum social distancing (max_sd) and maximum movement restriction (max_mr) score per country to the best model for maximum daily infection rate
+
+```{r}
+library(car)
+library(broom)
+library(jtools)
+#filter out instances where max_sd = 0
+new_daily_adj <- filter(daily, max_sd >0) %>%
+  select(rate, population, income, max_sd, max_mr) %>%
+  print
+#change income from a character variable into a factor
+new_daily_adj$income <- factor(new_daily_adj$income)
+str(new_daily_adj$income)
+#preliminary visualizations for daily rate by maximum social distancing and maximum movement restriction score
+ggplot(data = new_daily_adj, aes(x = max_sd, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+ggplot(data = new_daily_adj, aes(x = max_mr, y = rate)) +
+  geom_point() + geom_smooth(method = "lm")
+#log1p transform all variables except income
+new_daily_adj$log1prate <- log1p(new_daily_adj$rate)
+new_daily_adj$log1ppopulation <- log1p(new_daily_adj$population)
+new_daily_adj$log1pmax_sd <- log1p(new_daily_adj$max_sd)
+new_daily_adj$log1pmax_mr <- log1p(new_daily_adj$max_mr)
+#re-plot with transformed variables
+ggplot(data = new_daily_adj, aes(x = log1pmax_sd, y = log1prate)) +
+  geom_point() + geom_smooth(method="lm")
+ggplot(data = new_daily_adj, aes(x = log1pmax_mr, y = log1prate)) +
+  geom_point() + geom_smooth(method = "lm")
+#run full linear model
+m_new_daily <- lm(data = new_daily_adj, log1prate ~ log1ppopulation + income + log1pmax_sd + log1pmax_mr)
+summary(m_new_daily)
+tidy(m_new_daily)
+plot(fitted(m_new_daily), residuals(m_new_daily))
+hist(residuals(m_new_daily))
+qqnorm(residuals(m_new_daily))
+qqline(residuals(m_new_daily))
+```
+
+**Challenge 7 cont.**
+
+*model selection for maximum daily infection rate including variables for maximum social distancing and maximum movement restriction score
+
+```{r}
+library(MASS)
+library(MuMIn)
+#run stepwise selection using function stepAIC()
+(s <- stepAIC(m_new_daily, scope = . ~ ., direction = "both"))
+#model selection using function dredge()
+m_new_daily <- lm(data = new_daily_adj, log1prate ~ log1ppopulation + income + log1pmax_sd + log1pmax_mr,
+  na.action = "na.fail")
+m.set_new_daily <- dredge(m_new_daily, beta = "none", m.lim = c(0, 4))
+m.set_new_daily
+coef(m.set_new_daily)
+summary(get.models(m.set_new_daily, 1)[[1]])
+```
+The best model according to the results of both stepAIC() and dredge() for the maximum daily infection rate includes population, income, and max_sd as predictors. So yes, adding maximum social distancing score significantly improves the model.
+```{r}
+r.squaredGLMM(m_new_daily) #pseudo-R^2 for full model
+m_new_daily_best <- lm(data = new_daily_adj, log1prate ~ log1ppopulation + income + log1pmax_sd,
+  na.action = "na.fail")
+r.squaredGLMM(m_new_daily_best) #pseudo-R^2 for best model
+m_new_daily_null <- lm(data = new_daily_adj, log1prate ~ 1,
+  na.action = "na.fail")
+r.squaredGLMM(m_new_daily_null) #pseudo-R^2 for null model
+detach(package:MASS)
+```
+
+**Challenge 8**
+
+*run a set of mixed effects models to determine the predictors of daily infection rate
+```{r}
+library(lme4)
+library(MASS)
+library(MuMIn)
+#filter the original cv_data tibble
+new_cv_data <- filter(cv_data, population > 1000000 & variable == "daily_confirmed" & rate > 0 & gdp_capita != "NA") %>%
+  print
+#there are 16 possible nested models, starting with the full model (4 fixed effects and 2 random effects) 
+m1 <- lmer(data = new_cv_data, log(rate) ~ log(density) + log(gdp_capita) + soc_dist + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m2 <- lmer(data = new_cv_data, log(rate) ~ log(density) + log(gdp_capita) + soc_dist +
+  (1 | country) + (1 | date), REML = FALSE)
+m3 <- lmer(data = new_cv_data, log(rate) ~ log(density) + log(gdp_capita) + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m4 <- lmer(data = new_cv_data, log(rate) ~ log(density) + soc_dist + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m5 <- lmer(data = new_cv_data, log(rate) ~ log(gdp_capita) + soc_dist + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m6 <- lmer(data = new_cv_data, log(rate) ~ log(density) + log(gdp_capita) +
+  (1 | country) + (1 | date), REML = FALSE)
+m7 <- lmer(data = new_cv_data, log(rate) ~ log(density) + soc_dist +
+  (1 | country) + (1 | date), REML = FALSE)
+m8 <- lmer(data = new_cv_data, log(rate) ~ log(gdp_capita) + soc_dist +
+  (1 | country) + (1 | date), REML = FALSE)
+m9 <- lmer(data = new_cv_data, log(rate) ~ log(density) + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m10 <- lmer(data = new_cv_data, log(rate) ~ log(gdp_capita) + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m11 <- lmer(data = new_cv_data, log(rate) ~ soc_dist + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m12 <- lmer(data = new_cv_data, log(rate) ~ log(density) +
+  (1 | country) + (1 | date), REML = FALSE)
+m13 <- lmer(data = new_cv_data, log(rate) ~ log(gdp_capita) +
+  (1 | country) + (1 | date), REML = FALSE)
+m14 <- lmer(data = new_cv_data, log(rate) ~ soc_dist +
+  (1 | country) + (1 | date), REML = FALSE)
+m15 <- lmer(data = new_cv_data, log(rate) ~ mov_rest +
+  (1 | country) + (1 | date), REML = FALSE)
+m16 <- lmer(data = new_cv_data, log(rate) ~
+  (1 | country) + (1 | date), REML = FALSE)
+
+#model selection using function dredge()
+m1 <- lmer(data = new_cv_data, log(rate) ~ log(density) + log(gdp_capita) + soc_dist + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE, na.action = "na.fail")
+options(na.action = "na.fail")
+m.set_m1 <- dredge(m1, list(arg1 = list(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16), m.lim = c(0, 4)))
+m.set_m1
+coef(m.set_m1)
+summary(get.models(m.set_m1, 1)[[1]])
+#model selection using function aictab()
+library(AICcmodavg)
+(aic_table <- aictab(list(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16),
+  modnames = c("m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12", "m13", "m14", "m15", "m16")))
+```
+The best model according to the results of both dredge() and aictab() for the daily infection rate is model 5 (m5), which includes gdp_capita, mov_rest, and soc_dist as fixed effects (plus country and date as random effects).
+```{r}
+r.squaredGLMM(m1) #pseudo-R^2 for full model
+m_best <- lmer(data = new_cv_data, log(rate) ~ log(gdp_capita) + soc_dist + mov_rest +
+  (1 | country) + (1 | date), REML = FALSE, na.action = "na.fail")
+r.squaredGLMM(m_best) #pseudo-R^2 for best model
+m_null <- lmer(data = new_cv_data, log(rate) ~
+  (1 | country) + (1 | date), REML = FALSE, na.action = "na.fail")
+r.squaredGLMM(m_null) #pseudo-R^2 for null model
+#the conditional R2GLMM(c)^2 is high, while the R2GLMM(m)^2 is pretty low, suggesting that there is more variance explained by the random effects of country and date than by the fixed effects
+detach(package:MASS)
+```
